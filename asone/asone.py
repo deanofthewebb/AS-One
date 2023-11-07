@@ -290,7 +290,7 @@ class ASOne:
             cv2.putText(im0, f'FPS: {int(fps)}', (11, 35), 0, 1, [
                         225, 255, 255], thickness=2, lineType=cv2.LINE_AA)
 
-            if display:
+            if False:
                 cv2.imshow(' Sample', im0)
             if save_result:
                 video_writer.write(im0)
@@ -300,7 +300,7 @@ class ASOne:
             if cv2.waitKey(25) & 0xFF == ord('q'):
                 break
 
-            # yeild required values in form of (bbox_details, frames_details)
+            # yield required values in form of (bbox_details, frames_details)
             yield (bboxes_xyxy, ids, scores, class_ids), (im0 if display else frame, frame_id-1, fps)
 
         tac = time.time()
@@ -308,7 +308,6 @@ class ASOne:
 
 
 if __name__ == '__main__':
-    # asone = ASOne(tracker='norfair')
     asone = ASOne()
 
     asone.start_tracking('data/sample_videos/video2.mp4',
