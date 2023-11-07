@@ -52,7 +52,7 @@ class YOLOv5Detector:
 
     def image_preprocessing(self,
                             image: list,
-                            input_shape=(640, 640))-> list:
+                            input_shape=(768, 768))-> list:
 
         original_image = image.copy()
         image = letterbox(image, input_shape, stride=32, auto=False)[0]
@@ -64,7 +64,7 @@ class YOLOv5Detector:
         return original_image, image
     
     def detect(self, image: list,
-               input_shape: tuple = (640, 640),
+               input_shape: tuple = (768, 768),
                conf_thres: float = 0.25,
                iou_thres: float = 0.45,
                max_det: int = 1000,
@@ -74,29 +74,74 @@ class YOLOv5Detector:
                return_image=False) -> list:
      
         # Image Preprocessing
-        original_image, processed_image = self.image_preprocessing(image, input_shape)
-        
-        # Inference
-        if self.use_onnx:
-            # Input names of ONNX model on which it is exported   
-            input_name = self.model.get_inputs()[0].name
-            # Run onnx model 
-            pred = self.model.run([self.model.get_outputs()[0].name], {input_name: processed_image})[0]
-            # Run mlmodel   
-        
-        elif self.mlmodel:
-            h ,w = image.shape[:2]
-            pred = self.model.predict({"image":Image.fromarray(image).resize(input_shape)})
-            xyxy = yolo_to_xyxy(pred['coordinates'], input_shape)
-            out = generalize_output_format(xyxy, pred['confidence'], conf_thres)
-            if out != []:
-                detections = scale_bboxes(out, image.shape[:2], input_shape)
-            else:
-                detections = np.empty((0, 6))
+        with torch.no_grad():
+            original_image, processed_image = self.image_preprocessing(image, input_shape)
             
+            # Inference
+            if self.use_onnx:
+                # Input names of ONNX model on which it is exported   
+                input_name = self.model.get_inputs()[0].name
+                # Run onnx model 
+                pred = self.model.run([self.model.get_outputs()[0].name], {input_name: processed_image})[0]
+                # Run mlmodel   
+            
+            elif self.mlmodel:
+                h ,w = image.shape[:2]
+                pred = self.model.predict({"image":Image.fromarray(image).resize(input_shape)})
+                xyxy = yolo_to_xyxy(pred['coordinates'], input_shape)
+                out = generalize_output_format(xyxy, pred['confidence'], conf_thres)
+                if out != []:
+                    detections = scale_bboxes(out, image.shape[:2], input_shape)
+                else:
+                    detections = np.empty((0, 6))
+                
+                if filter_classes:
+                    class_names = get_names()
+    
+                    filter_class_idx = []
+                    if filter_classes:
+                        for _class in filter_classes:
+                            if _class.lower() in class_names:
+                                filter_class_idx.append(class_names.index(_class.lower()))
+                            else:
+                                warnings.warn(f"class {_class} not found in model classes list.")
+    
+                    detections = detections[np.in1d(detections[:,5].astype(int), filter_class_idx)]
+            
+                return detections, {'width':w, 'height':h}
+            # Run Pytorch model  
+            else:
+                processed_image = torch.from_numpy(processed_image).to(self.device)
+                # Change image floating point precision if fp16 set to true
+                processed_image = processed_image.half() if self.fp16 else processed_image.float() 
+                pred = self.model(processed_image, augment=False, visualize=False)[0]
+                
+            # Post Processing
+            if isinstance(pred, np.ndarray):
+                pred = torch.tensor(pred, device=self.device)
+            predictions = non_max_suppression(pred, conf_thres, 
+                                              iou_thres, 
+                                              agnostic=agnostic_nms, 
+                                              max_det=max_det)
+            
+            for i, prediction in enumerate(predictions):  # per image
+                if len(prediction):
+                    prediction[:, :4] = scale_coords(
+                        processed_image.shape[2:], prediction[:, :4], original_image.shape).round()
+                    predictions[i] = prediction
+            detections = predictions[0].cpu().numpy()
+            image_info = {
+                'width': original_image.shape[1],
+                'height': original_image.shape[0],
+            }
+    
+            self.boxes = detections[:, :4]
+            self.scores = detections[:, 4:5]
+            self.class_ids = detections[:, 5:6]
+    
             if filter_classes:
                 class_names = get_names()
-
+    
                 filter_class_idx = []
                 if filter_classes:
                     for _class in filter_classes:
@@ -104,54 +149,9 @@ class YOLOv5Detector:
                             filter_class_idx.append(class_names.index(_class.lower()))
                         else:
                             warnings.warn(f"class {_class} not found in model classes list.")
-
+    
                 detections = detections[np.in1d(detections[:,5].astype(int), filter_class_idx)]
-            
-            return detections, {'width':w, 'height':h}
-            # Run Pytorch model  
-        else:
-            processed_image = torch.from_numpy(processed_image).to(self.device)
-            # Change image floating point precision if fp16 set to true
-            processed_image = processed_image.half() if self.fp16 else processed_image.float() 
-            pred = self.model(processed_image, augment=False, visualize=False)[0]
-            
-        # Post Processing
-        if isinstance(pred, np.ndarray):
-            pred = torch.tensor(pred, device=self.device)
-        # print(pred)
-        predictions = non_max_suppression(pred, conf_thres, 
-                                          iou_thres, 
-                                          agnostic=agnostic_nms, 
-                                          max_det=max_det)
-        
-        for i, prediction in enumerate(predictions):  # per image
-            if len(prediction):
-                prediction[:, :4] = scale_coords(
-                    processed_image.shape[2:], prediction[:, :4], original_image.shape).round()
-                predictions[i] = prediction
-        detections = predictions[0].cpu().numpy()
-        image_info = {
-            'width': original_image.shape[1],
-            'height': original_image.shape[0],
-        }
-
-        self.boxes = detections[:, :4]
-        self.scores = detections[:, 4:5]
-        self.class_ids = detections[:, 5:6]
-
-        if filter_classes:
-            class_names = get_names()
-
-            filter_class_idx = []
-            if filter_classes:
-                for _class in filter_classes:
-                    if _class.lower() in class_names:
-                        filter_class_idx.append(class_names.index(_class.lower()))
-                    else:
-                        warnings.warn(f"class {_class} not found in model classes list.")
-
-            detections = detections[np.in1d(detections[:,5].astype(int), filter_class_idx)]
-
+    
         if return_image:
             return detections, original_image
         else: 
